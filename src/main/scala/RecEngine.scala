@@ -8,6 +8,11 @@ import org.apache.spark.sql.functions._
 
 /**
   * Created by Sila on 2017/10/03
+  *
+  * Link to dataset: https://www.instacart.com/datasets/grocery-shopping-2017
+  * Data dictionary: https://gist.github.com/jeremystan/c3b39d947d9b88b3ccff3147dbcf6c6b
+  *
+  * ALS based implicit-feedback recommender system evaluated on Mean Percentile Ranking (MPR)
   */
 
 object RecEngine {
