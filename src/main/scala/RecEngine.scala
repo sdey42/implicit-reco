@@ -1,6 +1,5 @@
 package com.okurtv.recengine
 
-import org.apache.spark.ml.linalg.{SparseVector, Vectors}
 import org.apache.spark.ml.recommendation.{ALS, ALSModel}
 import org.apache.spark.sql._
 import org.apache.spark.sql.expressions._
@@ -17,22 +16,21 @@ import org.apache.spark.sql.functions._
 
 object RecEngine {
 
-  def GetRawData(
+  def getRawData(
                   spark: SparkSession,
                   fType: String,
                   inDir: String,
                   mapFtypeToFilenames: Map[String, String]
-                ) = {
+                ): DataFrame = {
 
     spark.read.format("com.databricks.spark.csv")
       .option("header", "true")
       .option("inferSchema", "true")
       .option("delimiter", ",")
       .load(inDir + mapFtypeToFilenames(fType))
-
   }
 
-  def GetUserItemFreqDataset(
+  def getUserItemFreqDataset(
                               spark: SparkSession,
                               inDsPrior: Dataset[PriorOrdersDataset],
                               inDsOrders: Dataset[OrdersDataset]
@@ -52,14 +50,7 @@ object RecEngine {
       .as[UserItemFreqDataset]
   }
 
-  def AddTwoSparseOrderVecs(vec1: SparseVector, vec2: SparseVector): SparseVector = {
-    if (vec1.size == vec2.size & vec1.size > 0) {
-      val arrIdxs: Set[Int] = vec1.indices.toSet.union(vec2.indices.toSet)
-      Vectors.sparse(vec1.size, arrIdxs.map(i => (i, vec1(i) + vec2(i))).toSeq).toSparse
-    } else Vectors.dense(Array.empty[Double]).toSparse
-  }
-
-  def GetTrainTestDatasets(
+  def getTrainTestDatasets(
                             spark: SparkSession,
                             inDs: Dataset[UserItemFreqDataset])
   : (Dataset[UserItemFreqDataset], Dataset[UserItemFreqDataset]) = {
@@ -124,7 +115,7 @@ object RecEngine {
     (outTrainDs, outTestDs)
   }
 
-  def RunALSToGetPredictions(
+  def runALSToGetPredictions(
                               spark: SparkSession,
                               inDsTrain: Dataset[UserItemFreqDataset],
                               inDsTest: Dataset[TestDatasetForPrediction],
@@ -132,8 +123,9 @@ object RecEngine {
                             ): (ALSModel, Dataset[TestPredictionsDataset]) = {
     val als = new ALS()
       .setImplicitPrefs(true)
-      .setNonnegative(params.nonNegativeFlag)
       .setSeed(42L)
+      .setNumBlocks(4)
+      .setNonnegative(params.nonNegativeFlag)
       .setColdStartStrategy(params.coldStartStrategy)
       .setMaxIter(params.maxIters)
       .setRank(params.numLatentFactors)
@@ -158,16 +150,21 @@ object RecEngine {
     (model, predictions)
   }
 
-  def GetMPRScore(spark: SparkSession, inDsPreds: Dataset[TestPredictionsDataset]): Double = {
+  def getMPRScore(
+                   spark: SparkSession,
+                   inDsTest: Dataset[UserItemFreqDataset],
+                   inDsPreds: Dataset[TestPredictionsDataset]
+                 ): Double = {
     // Mean Percentile Rank Score
     import spark.implicits._
     val pctWindow = Window.partitionBy("userId").orderBy(col("prediction").desc)
 
-    inDsPreds.select(col("userId"), col("itemId"), col("prediction")
-      , percent_rank().over(pctWindow).as("percent_rank")
-    ).map(r => r.getDouble(3)*100 * r.getFloat(2)).reduce(_+_) /
-      inDsPreds.map(_.prediction).reduce(_+_)
+    val dfTestWithPreds = inDsTest.join(inDsPreds, Seq("userId", "itemId"))
 
+    dfTestWithPreds.select(col("userId"), col("itemId"), col("freq")
+      , percent_rank().over(pctWindow).as("percent_rank")
+    ).map(r => r.getInt(2) * r.getDouble(3)*100).reduce(_+_) /
+      inDsTest.map(_.freq).reduce(_+_)
   }
 
   def main(args: Array[String]) {
@@ -188,18 +185,18 @@ object RecEngine {
     )
 
     import spark.implicits._
-    val dsOrders: Dataset[OrdersDataset] = GetRawData(spark, "orders", inDir, mapFiletypeToFilenames)
+    val dsOrders: Dataset[OrdersDataset] = getRawData(spark, "orders", inDir, mapFiletypeToFilenames)
       .as[OrdersDataset]
       .filter(_.eval_set=="prior")
 
-    val dsPriorOrders: Dataset[PriorOrdersDataset] = GetRawData(spark, "priors", inDir, mapFiletypeToFilenames)
+    val dsPriorOrders: Dataset[PriorOrdersDataset] = getRawData(spark, "priors", inDir, mapFiletypeToFilenames)
       .as[PriorOrdersDataset]
 
-    val dsUserItemFreq: Dataset[UserItemFreqDataset] = GetUserItemFreqDataset(spark, dsPriorOrders, dsOrders)
+    val dsUserItemFreq: Dataset[UserItemFreqDataset] = getUserItemFreqDataset(spark, dsPriorOrders, dsOrders)
     dsUserItemFreq.repartition(4).cache()
 
     val (dsTrain, dsTest) : (Dataset[UserItemFreqDataset], Dataset[UserItemFreqDataset]) =
-      GetTrainTestDatasets(spark, dsUserItemFreq)
+      getTrainTestDatasets(spark, dsUserItemFreq)
     println(s"***** DONE Getting Train + Test datasets *****")
     // dsUserItemFreq has (rows, users, items) -> (13307953,206209,49677)
     // dsTrain has (rows, users, items) -> (9284926,206209,49677)
@@ -215,19 +212,19 @@ object RecEngine {
     val paramsForALSImplicit: ALSImplicitParams = ALSImplicitParams(
       nonNegativeFlag = true
       , coldStartStrategy = "drop"
-      , numLatentFactors = 60
+      , numLatentFactors = 20
       , maxIters = 10
       , alpha = 40D
       , lambdaForReg = 0.01D
     )
 
     val (model, dsPreds) : (ALSModel, Dataset[TestPredictionsDataset]) =
-      RunALSToGetPredictions(spark, dsTrain, dsTestForPredict, paramsForALSImplicit)
+      runALSToGetPredictions(spark, dsTrain, dsTestForPredict, paramsForALSImplicit)
     println(s"***** ALS Implicit ran with params: ${paramsForALSImplicit.toString} *****")
     dsPreds.repartition(4).cache()
     println(s"***** DONE Caching Predictions dataset *****")
 
-    val mpr: Double = GetMPRScore(spark, dsPreds)
+    val mpr: Double = getMPRScore(spark, dsTest, dsPreds)
     println(s"***** ALS implementation has MPR score of ${mpr} *****")
 
     val userRecs: DataFrame = model.recommendForAllItems(10)
