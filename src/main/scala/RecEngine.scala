@@ -212,7 +212,7 @@ object RecEngine {
     val paramsForALSImplicit: ALSImplicitParams = ALSImplicitParams(
       nonNegativeFlag = true
       , coldStartStrategy = "drop"
-      , numLatentFactors = 20
+      , numLatentFactors = 140
       , maxIters = 10
       , alpha = 40D
       , lambdaForReg = 0.01D
