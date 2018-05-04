@@ -1,4 +1,4 @@
-# implicit-reco
+# Predicting Items For Users
 
 DATA:  
 https://www.instacart.com/datasets/grocery-shopping-2017
